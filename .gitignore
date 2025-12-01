@@ -1,3 +1,10 @@
+# Data files
+# Ignore all parquet, txt, csv, and json files in the data directory and subdirectories
+data/**/*.parquet
+data/**/*.txt
+data/**/*.csv
+data/**/*.json
+
 # Python-generated files
 __pycache__/
 *.py[oc]
