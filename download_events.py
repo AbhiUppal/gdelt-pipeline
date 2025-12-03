@@ -95,8 +95,8 @@ async def _download_event_file(url: str, file_date: date, max_retries: int = 3):
     """Download a file with retry logic."""
     filename = url.split("/")[-1]
 
-    # Create directory structure: data/events/YYYY/MM/DD/
-    year_dir = os.path.join("data", "events", str(file_date.year))
+    # Create directory structure: data/events2/YYYY/MM/DD/
+    year_dir = os.path.join("data", "events2", str(file_date.year))
     month_dir = os.path.join(year_dir, f"{file_date.month:02d}")
     day_dir = os.path.join(month_dir, f"{file_date.day:02d}")
     os.makedirs(day_dir, exist_ok=True)
