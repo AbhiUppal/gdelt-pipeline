@@ -1,8 +1,18 @@
 import argparse
+import logging
 import os
 import polars as pl
 from datetime import date
 from download_events_v2 import get_dates_to_process
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    filename="logs/process_events.log"
+)
+logger = logging.getLogger(__name__)
 
 
 # GDELT 2.0 Events schema based on the official codebook
@@ -97,7 +107,7 @@ def process_day(process_date: date, force: bool = False) -> bool:
 
     # Check if directory exists
     if not os.path.exists(day_dir):
-        print(f"Directory does not exist: {day_dir}")
+        logger.warning(f"Directory does not exist: {day_dir}")
         return False
 
     # Define output parquet file path
@@ -106,7 +116,7 @@ def process_day(process_date: date, force: bool = False) -> bool:
 
     # Check if parquet file already exists
     if os.path.exists(parquet_path) and not force:
-        print(f"Parquet file already exists: {parquet_path} (use --force to reprocess)")
+        logger.info(f"Parquet file already exists: {parquet_path} (use --force to reprocess)")
         return False
 
     # Find all CSV files in the directory
@@ -117,16 +127,17 @@ def process_day(process_date: date, force: bool = False) -> bool:
     ]
 
     if not csv_files:
-        print(f"No CSV files found in {day_dir}")
+        logger.warning(f"No CSV files found in {day_dir}")
         return False
 
-    print(f"Processing {len(csv_files)} CSV file(s) for {process_date}...")
+    logger.info(f"Processing {len(csv_files)} CSV file(s) for {process_date}...")
 
     try:
         # Read all CSV files and concatenate them
         # GDELT files are tab-delimited with no header
         dataframes = []
         for csv_file in sorted(csv_files):
+            logger.debug(f"Reading {os.path.basename(csv_file)}")
             df = pl.read_csv(
                 csv_file,
                 separator="\t",
@@ -140,21 +151,21 @@ def process_day(process_date: date, force: bool = False) -> bool:
         # Concatenate all dataframes
         combined_df = pl.concat(dataframes)
 
-        print(f"Combined {len(combined_df)} total events")
+        logger.info(f"Combined {len(combined_df)} total events")
 
         # Write to parquet
         combined_df.write_parquet(parquet_path, compression="snappy")
-        print(f"Wrote parquet file: {parquet_path}")
+        logger.info(f"Wrote parquet file: {parquet_path}")
 
         # Delete CSV files after successful write
         for csv_file in csv_files:
             os.remove(csv_file)
-        print(f"Deleted {len(csv_files)} CSV file(s)")
+        logger.info(f"Deleted {len(csv_files)} CSV file(s)")
 
         return True
 
     except Exception as e:
-        print(f"Error processing {process_date}: {e}")
+        logger.error(f"Error processing {process_date}: {e}", exc_info=True)
         return False
 
 
@@ -176,30 +187,32 @@ def main():
     )
 
     args = parser.parse_args()
+
+    logger.info("Starting GDELT events processing")
     dates = get_dates_to_process(args.dates)
 
     if args.force:
-        print("Force mode: reprocessing all dates")
+        logger.warning("Force mode: reprocessing all dates")
     else:
-        print(f"Processing {len(dates)} date(s):")
+        logger.info(f"Processing {len(dates)} date(s):")
         for d in dates:
-            print(f"  {d}")
+            logger.info(f"  {d}")
 
     # Process each date
     success_count = 0
     fail_count = 0
 
     for process_date in dates:
-        print(f"\n--- Processing {process_date} ---")
+        logger.info(f"--- Processing {process_date} ---")
         if process_day(process_date, force=args.force):
             success_count += 1
         else:
             fail_count += 1
 
     # Summary
-    print(f"\n=== Summary ===")
-    print(f"Successfully processed: {success_count}")
-    print(f"Failed or skipped: {fail_count}")
+    logger.info("=== Summary ===")
+    logger.info(f"Successfully processed: {success_count}")
+    logger.info(f"Failed or skipped: {fail_count}")
 
 
 if __name__ == "__main__":

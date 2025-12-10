@@ -3,12 +3,21 @@ import os
 import io
 from datetime import date
 from dotenv import load_dotenv
+import logging
 import polars as pl
 import psycopg
 from psycopg import sql
 from download_events_v2 import get_dates_to_process
 from process_events import EVENTS_SCHEMA
 
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    filename="logs/process_events.log"
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -44,7 +53,7 @@ def create_events_table(conn):
     Args:
         conn: psycopg connection object
     """
-    print("\n=== Creating/Verifying Events Table ===")
+    logger.info("Creating/Verifying Events Table")
 
     # Build column definitions from schema
     columns = []
@@ -66,7 +75,7 @@ def create_events_table(conn):
     with conn.cursor() as cur:
         cur.execute(create_table_sql)
         conn.commit()
-        print("✓ Events table created/verified")
+        logger.info("Events table created/verified")
 
         # Create indexes
         indexes = [
@@ -77,7 +86,7 @@ def create_events_table(conn):
             ('idx_events_eventcode', 'EventCode'),
         ]
 
-        print("\n=== Creating Indexes ===")
+        logger.info("Creating Indexes")
         for idx_name, col_name in indexes:
             try:
                 cur.execute(
@@ -86,12 +95,12 @@ def create_events_table(conn):
                         sql.Identifier(col_name)
                     )
                 )
-                print(f"✓ Index {idx_name} on {col_name}")
+                logger.debug(f"Index {idx_name} on {col_name}")
             except Exception as e:
-                print(f"✗ Failed to create index {idx_name}: {e}")
+                logger.error(f"Failed to create index {idx_name}: {e}")
 
         conn.commit()
-        print("✓ All indexes created/verified")
+        logger.info("All indexes created/verified")
 
 
 def delete_events_for_date(conn, process_date: date) -> int:
@@ -142,7 +151,7 @@ def load_parquet_to_db(conn, parquet_path: str, process_date: date) -> int:
     df = pl.read_parquet(parquet_path)
     total_rows = len(df)
 
-    print(f"  Loaded {total_rows} rows from parquet")
+    logger.info(f"Loaded {total_rows} rows from parquet")
 
     # Process in batches of 10,000
     batch_size = 10_000
@@ -177,7 +186,7 @@ def load_parquet_to_db(conn, parquet_path: str, process_date: date) -> int:
         total_inserted += batch_inserted
 
         if total_rows > batch_size:
-            print(f"  Inserted batch: {batch_start + 1}-{batch_end} ({batch_inserted} rows)")
+            logger.debug(f"Inserted batch: {batch_start + 1}-{batch_end} ({batch_inserted} rows)")
 
     conn.commit()
     return total_inserted
@@ -204,17 +213,17 @@ def process_date_load(conn, process_date: date, force: bool = False) -> bool:
 
     # Check if parquet file exists
     if not os.path.exists(parquet_path):
-        print(f"✗ Parquet file not found: {parquet_path}")
+        logger.error(f"Parquet file not found: {parquet_path}")
         return False
 
-    print(f"  Found parquet file: {parquet_path}")
+    logger.info(f"Found parquet file: {parquet_path}")
 
     try:
         # Delete existing data if force mode
         if force:
-            print("  Force mode: deleting existing data...")
+            logger.info("Force mode: deleting existing data...")
             deleted_count = delete_events_for_date(conn, process_date)
-            print(f"  ✓ Deleted {deleted_count:,} existing row(s)")
+            logger.info(f"Deleted {deleted_count:,} existing row(s)")
         else:
             # Check if data already exists (by DATEADDED, not Day)
             dateadded_start = int(process_date.strftime("%Y%m%d") + "000000")
@@ -226,19 +235,19 @@ def process_date_load(conn, process_date: date, force: bool = False) -> bool:
                 )
                 existing_count = cur.fetchone()[0]
                 if existing_count > 0:
-                    print(f"  ✗ Data already exists for {process_date} ({existing_count:,} rows)")
-                    print(f"    Use --force to replace existing data")
+                    logger.warning(f"Data already exists for {process_date} ({existing_count:,} rows)")
+                    logger.warning(f"Use --force to replace existing data")
                     return False
 
         # Load data
-        print("  Loading data into database...")
+        logger.info("Loading data into database...")
         inserted_count = load_parquet_to_db(conn, parquet_path, process_date)
-        print(f"  ✓ Inserted {inserted_count:,} row(s)")
+        logger.info(f"Inserted {inserted_count:,} row(s)")
 
         return True
 
     except Exception as e:
-        print(f"  ✗ Error loading data: {e}")
+        logger.error(f"Error loading data: {e}", exc_info=True)
         conn.rollback()
         return False
 
@@ -261,26 +270,27 @@ def main():
     )
 
     args = parser.parse_args()
+
+    logger.info("=" * 60)
+    logger.info("GDELT Events Database Loader")
+    logger.info("=" * 60)
+
     dates = get_dates_to_process(args.dates)
 
-    print("=" * 60)
-    print("GDELT Events Database Loader")
-    print("=" * 60)
-
     if args.force:
-        print("\n⚠️  FORCE MODE: Will replace existing data")
+        logger.warning("FORCE MODE: Will replace existing data")
 
-    print(f"\nProcessing {len(dates)} date(s):")
+    logger.info(f"Processing {len(dates)} date(s):")
     for d in dates:
-        print(f"  • {d}")
+        logger.info(f"  • {d}")
 
     # Connect to database
-    print("\n=== Connecting to Database ===")
+    logger.info("Connecting to Database")
     try:
         conn = psycopg.connect(**DB_CONFIG)
-        print(f"✓ Connected to {DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}")
+        logger.info(f"Connected to {DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}")
     except Exception as e:
-        print(f"✗ Failed to connect to database: {e}")
+        logger.error(f"Failed to connect to database: {e}", exc_info=True)
         return
 
     try:
@@ -288,31 +298,31 @@ def main():
         create_events_table(conn)
 
         # Process each date
-        print("\n" + "=" * 60)
-        print("LOADING DATA")
-        print("=" * 60)
+        logger.info("=" * 60)
+        logger.info("LOADING DATA")
+        logger.info("=" * 60)
 
         success_count = 0
         fail_count = 0
 
         for process_date in dates:
-            print(f"\n--- {process_date} ---")
+            logger.info(f"--- {process_date} ---")
             if process_date_load(conn, process_date, force=args.force):
                 success_count += 1
             else:
                 fail_count += 1
 
         # Summary
-        print("\n" + "=" * 60)
-        print("SUMMARY")
-        print("=" * 60)
-        print(f"✓ Successfully loaded: {success_count}")
-        print(f"✗ Failed or skipped:   {fail_count}")
-        print("=" * 60)
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"Successfully loaded: {success_count}")
+        logger.info(f"Failed or skipped:   {fail_count}")
+        logger.info("=" * 60)
 
     finally:
         conn.close()
-        print("\n✓ Database connection closed")
+        logger.info("Database connection closed")
 
 
 if __name__ == "__main__":

@@ -3,10 +3,20 @@ import asyncio
 import calendar
 from datetime import date, timedelta
 import httpx
+import logging
 import polars as pl
 import os
 import re
 import zipfile
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    filename="logs/download_events_v2.log"
+)
+logger = logging.getLogger(__name__)
 
 
 def parse_date_argument(date_str: str) -> list[date]:
@@ -112,24 +122,27 @@ async def _download_event_file(url: str, file_date: date, max_retries: int = 3):
                     # Write the zip file
                     with open(zip_path, "wb") as f:
                         f.write(response.content)
+                    logger.debug(f"Downloaded {filename}")
 
                     # Extract the zip file
                     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                         zip_ref.extractall(day_dir)
                     os.remove(zip_path)
+                    logger.debug(f"Extracted and cleaned up {filename}")
                     return
                 else:
                     error_msg = f"Failed to download {url}: HTTP {response.status_code}"
                     if attempt < max_retries - 1:
-                        print(f"{error_msg}, retrying in 1s... (attempt {attempt + 1}/{max_retries})")
+                        logger.warning(f"{error_msg}, retrying in 1s... (attempt {attempt + 1}/{max_retries})")
                         await asyncio.sleep(1)
                     else:
                         raise ValueError(error_msg)
         except Exception as e:
             if attempt < max_retries - 1:
-                print(f"Error downloading {url}: {e}, retrying in 1s... (attempt {attempt + 1}/{max_retries})")
+                logger.warning(f"Error downloading {url}: {e}, retrying in 1s... (attempt {attempt + 1}/{max_retries})")
                 await asyncio.sleep(1)
             else:
+                logger.error(f"Failed to download {url} after {max_retries} attempts: {e}")
                 raise
 
 
@@ -142,6 +155,7 @@ async def download_events(dates: list[date], master_list: pl.DataFrame, force: b
         master_list: Master file list dataframe
         force: If True, ignore date and processed filters
     """
+    logger.info("Filtering master list for export files")
     # Filter master list to only export files
     files_to_download = master_list.filter(pl.col("url").str.contains("export.CSV.zip"))
 
@@ -153,10 +167,10 @@ async def download_events(dates: list[date], master_list: pl.DataFrame, force: b
         files_to_download = files_to_download.filter(pl.col("processed") == False)
 
     if len(files_to_download) == 0:
-        print("No files to download")
+        logger.info("No files to download")
         return
 
-    print(f"Downloading {len(files_to_download)} file(s)...")
+    logger.info(f"Downloading {len(files_to_download)} file(s)...")
 
     # Create download tasks for all files
     tasks = []
@@ -165,13 +179,14 @@ async def download_events(dates: list[date], master_list: pl.DataFrame, force: b
         file_date = row["date"]
         filename = url.split("/")[-1]
 
-        print(f"[{i}/{len(files_to_download)}] Queuing {filename}...")
+        logger.info(f"[{i}/{len(files_to_download)}] Queuing {filename}...")
         tasks.append(_download_event_file(url, file_date))
 
     # Download all files concurrently
+    logger.info("Starting concurrent downloads")
     await asyncio.gather(*tasks)
 
-    print("Download complete!")
+    logger.info("Download complete!")
 
 
 def main():
@@ -190,16 +205,19 @@ def main():
     )
 
     args = parser.parse_args()
+
+    logger.info("Starting GDELT events download")
     dates = get_dates_to_process(args.dates)
 
+    logger.info("Loading master file list")
     master_list = pl.read_parquet("data/masterfilelist.parquet")
 
     if not args.force:
-        print(f"Processing {len(dates)} date(s):")
+        logger.info(f"Processing {len(dates)} date(s):")
         for d in dates:
-            print(f"  {d}")
+            logger.info(f"  {d}")
     else:
-        print("Force mode: downloading all available export files")
+        logger.warning("Force mode: downloading all available export files")
 
     asyncio.run(download_events(dates, master_list, force=args.force))
 
