@@ -1,7 +1,7 @@
 import argparse
 import os
 import io
-from datetime import date
+from datetime import date, datetime
 from dotenv import load_dotenv
 import logging
 import polars as pl
@@ -192,6 +192,45 @@ def load_parquet_to_db(conn, parquet_path: str, process_date: date) -> int:
     return total_inserted
 
 
+def replace_parquet_with_marker(parquet_path: str, row_count: int, file_size: int) -> None:
+    """
+    Replace a parquet file with an empty text file containing upload metadata.
+
+    Args:
+        parquet_path: Path to the parquet file to replace
+        row_count: Number of rows that were uploaded
+        file_size: Original file size in bytes
+
+    Raises:
+        Exception: If file replacement fails
+    """
+    # Create the text file path
+    txt_path = parquet_path.replace('.parquet', '.txt')
+
+    # Create metadata content
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    metadata = f"""Upload completed successfully
+Timestamp: {timestamp}
+Rows uploaded: {row_count:,}
+Original file size: {file_size:,} bytes ({file_size / 1024 / 1024:.2f} MB)
+"""
+
+    try:
+        # Write the metadata to the text file
+        with open(txt_path, 'w') as f:
+            f.write(metadata)
+
+        # Delete the parquet file
+        os.remove(parquet_path)
+
+        logger.info(f"Replaced {os.path.basename(parquet_path)} with {os.path.basename(txt_path)}")
+    except Exception as e:
+        # Clean up the text file if it was created
+        if os.path.exists(txt_path):
+            os.remove(txt_path)
+        raise Exception(f"Failed to replace parquet file with marker: {e}")
+
+
 def process_date_load(conn, process_date: date, force: bool = False) -> bool:
     """
     Load events for a specific date into the database.
@@ -210,6 +249,21 @@ def process_date_load(conn, process_date: date, force: bool = False) -> bool:
     day_dir = os.path.join(month_dir, f"{process_date.day:02d}")
     parquet_filename = f"{process_date.strftime('%Y%m%d')}.parquet"
     parquet_path = os.path.join(day_dir, parquet_filename)
+    txt_marker_path = parquet_path.replace('.parquet', '.txt')
+
+    # Check if already uploaded (txt marker exists)
+    if os.path.exists(txt_marker_path):
+        if not force:
+            logger.info(f"Data already uploaded for {process_date} (marker file exists)")
+            logger.info(f"Use --force to re-upload")
+            return False
+        else:
+            # In force mode, we need the parquet file to exist
+            # If only marker exists, user needs to re-process the data first
+            if not os.path.exists(parquet_path):
+                logger.error(f"Marker file exists but parquet file not found: {parquet_path}")
+                logger.error(f"Re-process the date first using process_events.py")
+                return False
 
     # Check if parquet file exists
     if not os.path.exists(parquet_path):
@@ -219,6 +273,9 @@ def process_date_load(conn, process_date: date, force: bool = False) -> bool:
     logger.info(f"Found parquet file: {parquet_path}")
 
     try:
+        # Get file size before processing
+        file_size = os.path.getsize(parquet_path)
+
         # Delete existing data if force mode
         if force:
             logger.info("Force mode: deleting existing data...")
@@ -243,6 +300,15 @@ def process_date_load(conn, process_date: date, force: bool = False) -> bool:
         logger.info("Loading data into database...")
         inserted_count = load_parquet_to_db(conn, parquet_path, process_date)
         logger.info(f"Inserted {inserted_count:,} row(s)")
+
+        # Replace parquet file with marker after successful upload
+        try:
+            replace_parquet_with_marker(parquet_path, inserted_count, file_size)
+        except Exception as e:
+            logger.error(f"Failed to replace parquet with marker file: {e}")
+            logger.error("Rolling back transaction...")
+            conn.rollback()
+            return False
 
         return True
 
